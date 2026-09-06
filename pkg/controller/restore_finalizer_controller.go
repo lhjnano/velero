@@ -55,6 +55,10 @@ import (
 	"github.com/vmware-tanzu/velero/pkg/util/results"
 )
 
+// isDefaultStorageClassAnnotation is the standard Kubernetes annotation
+// marking a StorageClass as the cluster default.
+const isDefaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
+
 type restoreFinalizerReconciler struct {
 	client.Client
 	namespace         string
@@ -392,11 +396,15 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 					// failures due to the PVC not being bound, which could cause a timeout and result in a failed restore.
 					if pvc.Status.Phase == corev1api.ClaimPending {
 						// check if storage class used has VolumeBindingMode as WaitForFirstConsumer
-						if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != "" {
-							scName := *pvc.Spec.StorageClassName
+						scName := ""
+						if pvc.Spec.StorageClassName != nil {
+							scName = *pvc.Spec.StorageClassName
+						}
+
+						if scName != "" {
+							// An explicitly named StorageClass.
 							sc := &storagev1api.StorageClass{}
 							err = ctx.crClient.Get(context.Background(), client.ObjectKey{Name: scName}, sc)
-
 							if err != nil {
 								return false, err
 							}
@@ -406,7 +414,27 @@ func (ctx *finalizerContext) patchDynamicPVWithVolumeInfo() (errs results.Result
 								log.Warnf("skipping PV patch to restore custom reclaim policy, if any: StorageClass %s used by PVC %s has VolumeBindingMode set to WaitForFirstConsumer, and the PVC is also in a pending state", scName, pvc.Name)
 								return true, nil
 							}
+						} else if pvc.Spec.StorageClassName == nil {
+							// A nil storageClassName means the PVC uses the cluster
+							// default StorageClass. There may be more than one annotated
+							// default during transitions, so check all of them.
+							scList := &storagev1api.StorageClassList{}
+							if err = ctx.crClient.List(context.Background(), scList); err != nil {
+								return false, err
+							}
+							for i := range scList.Items {
+								sc := &scList.Items[i]
+								if sc.Annotations[isDefaultStorageClassAnnotation] != "true" {
+									continue
+								}
+								if sc.VolumeBindingMode != nil && *sc.VolumeBindingMode == storagev1api.VolumeBindingWaitForFirstConsumer {
+									log.Warnf("skipping PV patch to restore custom reclaim policy, if any: default StorageClass %s used by PVC %s has VolumeBindingMode set to WaitForFirstConsumer, and the PVC is also in a pending state", sc.Name, pvc.Name)
+									return true, nil
+								}
+							}
 						}
+						// An empty-string storageClassName means "no StorageClass";
+						// there is no binding mode to check, so proceed.
 					}
 
 					if pvc.Status.Phase != corev1api.ClaimBound || pvc.Spec.VolumeName == "" {
