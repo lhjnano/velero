@@ -60,7 +60,7 @@ func TestSchedulePatchThreshold(t *testing.T) {
 	ctx := context.Background()
 	const (
 		testCron     = "0 0 1 1 *"
-		testLastBk   = "2026-09-06 00:00:00"
+		testLastBk   = "9999-09-06 00:00:00"
 		testSchedule = "name" // newScheduleBuilder hardcodes ns/name (see schedule_controller_test.go)
 	)
 
